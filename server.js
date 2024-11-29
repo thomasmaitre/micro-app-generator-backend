@@ -5,13 +5,16 @@ const fetch = require('node-fetch');
 
 const app = express();
 
-// Configure CORS to accept requests from GitHub Pages
-app.use(cors({
-    origin: ['https://thomasmaitre.github.io', 'http://localhost:3000'],
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Accept']
-}));
+// Configure CORS to accept requests from all origins during development
+const corsOptions = {
+    origin: '*', // Allow all origins
+    methods: ['GET', 'POST', 'OPTIONS'], // Allow these HTTP methods
+    allowedHeaders: ['Content-Type', 'Accept', 'Origin'], // Allow these headers
+    credentials: false, // Don't allow credentials
+    optionsSuccessStatus: 200 // Return 200 for OPTIONS requests
+};
 
+app.use(cors(corsOptions));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
