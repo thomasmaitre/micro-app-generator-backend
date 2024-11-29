@@ -4,19 +4,28 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-app.use(cors());
+
+// Configure CORS to accept requests from GitHub Pages
+app.use(cors({
+    origin: ['https://thomasmaitre.github.io', 'http://localhost:3000'],
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Accept']
+}));
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 2000; // 2 seconds
 
 // Add a root endpoint for testing
 app.get('/', (req, res) => {
     res.json({ status: 'Server is running', endpoints: ['/generate-card'] });
 });
 
-app.post('/generate-card', async (req, res) => {
+async function makeOpenAIRequest(description, retryCount = 0) {
     try {
-        const { description } = req.body;
+        console.log(`Making OpenAI request for description: ${description} (attempt ${retryCount + 1})`);
         
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
@@ -40,17 +49,59 @@ app.post('/generate-card', async (req, res) => {
             })
         });
 
+        console.log('OpenAI response status:', response.status);
+        const responseData = await response.json();
+        console.log('OpenAI response:', responseData);
+
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error?.message || 'API request failed');
+            if (responseData.error?.type === 'resource_exhausted' && retryCount < MAX_RETRIES) {
+                console.log('Rate limit hit, retrying after delay...');
+                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                return makeOpenAIRequest(description, retryCount + 1);
+            }
+            throw new Error(responseData.error?.message || 'API request failed');
         }
 
-        const data = await response.json();
-        const cardJson = JSON.parse(data.choices[0].message.content);
+        const cardJson = JSON.parse(responseData.choices[0].message.content);
+        return cardJson;
+    } catch (error) {
+        console.error('Error in makeOpenAIRequest:', error);
+        if (error.message.includes('rate limit') && retryCount < MAX_RETRIES) {
+            console.log('Rate limit error, retrying after delay...');
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+            return makeOpenAIRequest(description, retryCount + 1);
+        }
+        throw error;
+    }
+}
+
+app.post('/generate-card', async (req, res) => {
+    console.log('Received request:', req.body);
+    
+    try {
+        const { description } = req.body;
+        
+        if (!description) {
+            return res.status(400).json({ 
+                error: 'Description is required',
+                details: 'Please provide a description for the card generation'
+            });
+        }
+
+        const cardJson = await makeOpenAIRequest(description);
+        console.log('Successfully generated card');
         res.json(cardJson);
     } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('Error in /generate-card:', error);
+        const statusCode = error.message.includes('rate limit') ? 429 : 500;
+        const userMessage = error.message.includes('rate limit') 
+            ? 'The service is temporarily busy. Please try again in a few moments.'
+            : 'An error occurred while generating the card. Please try again.';
+        
+        res.status(statusCode).json({ 
+            error: userMessage,
+            details: error.message 
+        });
     }
 });
 
