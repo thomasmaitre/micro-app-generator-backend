@@ -74,10 +74,11 @@ async function makeOpenAIRequest(description, retryCount = 0) {
         console.log('OpenAI response:', responseData);
 
         if (!response.ok) {
-            if (responseData.error?.type === 'resource_exhausted' && retryCount < MAX_RETRIES) {
-                console.log('Rate limit hit, retrying after delay...');
-                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-                return makeOpenAIRequest(description, retryCount + 1);
+            if (responseData.error?.type === 'resource_exhausted' || responseData.error?.message?.includes('rate limit')) {
+                const error = new Error('Rate limit reached');
+                error.isRateLimit = true;
+                error.retryAfter = 3600; // 1 hour in seconds
+                throw error;
             }
             throw new Error(responseData.error?.message || 'API request failed');
         }
@@ -91,10 +92,9 @@ async function makeOpenAIRequest(description, retryCount = 0) {
         }
     } catch (error) {
         console.error('Error in makeOpenAIRequest:', error);
-        if (error.message.includes('rate limit') && retryCount < MAX_RETRIES) {
-            console.log('Rate limit error, retrying after delay...');
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            return makeOpenAIRequest(description, retryCount + 1);
+        if (error.isRateLimit && retryCount < MAX_RETRIES) {
+            console.log('Rate limit hit, waiting for 1 hour...');
+            throw error; // Let the main handler deal with rate limit errors
         }
         throw error;
     }
@@ -118,9 +118,18 @@ app.post('/generate-card', async (req, res) => {
         res.json(cardJson);
     } catch (error) {
         console.error('Error in /generate-card:', error);
-        const statusCode = error.message.includes('rate limit') ? 429 : 500;
-        const userMessage = error.message.includes('rate limit') 
-            ? 'The service is temporarily busy. Please try again in a few moments.'
+        
+        if (error.isRateLimit) {
+            return res.status(429).json({
+                error: 'Rate limit exceeded',
+                details: 'The AI service is currently at capacity. Please try again in about an hour.',
+                retryAfter: error.retryAfter || 3600
+            });
+        }
+        
+        const statusCode = error.message.includes('API key') ? 500 : 500;
+        const userMessage = error.message.includes('API key') 
+            ? 'Server configuration error. Please contact support.'
             : 'An error occurred while generating the card. Please try again.';
         
         res.status(statusCode).json({ 
