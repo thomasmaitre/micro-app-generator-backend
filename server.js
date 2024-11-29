@@ -21,13 +21,30 @@ const PORT = process.env.PORT || 3000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000; // 2 seconds
 
+// Add error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Global error handler:', err);
+    res.status(500).json({
+        error: 'Internal server error',
+        details: err.message
+    });
+});
+
 // Add a root endpoint for testing
 app.get('/', (req, res) => {
-    res.json({ status: 'Server is running', endpoints: ['/generate-card'] });
+    res.json({ 
+        status: 'Server is running',
+        endpoints: ['/generate-card'],
+        version: '1.0.0'
+    });
 });
 
 async function makeOpenAIRequest(description, retryCount = 0) {
     try {
+        if (!process.env.OPENAI_API_KEY) {
+            throw new Error('OpenAI API key is not configured');
+        }
+
         console.log(`Making OpenAI request for description: ${description} (attempt ${retryCount + 1})`);
         
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -65,8 +82,13 @@ async function makeOpenAIRequest(description, retryCount = 0) {
             throw new Error(responseData.error?.message || 'API request failed');
         }
 
-        const cardJson = JSON.parse(responseData.choices[0].message.content);
-        return cardJson;
+        try {
+            const cardJson = JSON.parse(responseData.choices[0].message.content);
+            return cardJson;
+        } catch (parseError) {
+            console.error('Error parsing OpenAI response:', responseData.choices[0].message.content);
+            throw new Error('Failed to parse OpenAI response as JSON');
+        }
     } catch (error) {
         console.error('Error in makeOpenAIRequest:', error);
         if (error.message.includes('rate limit') && retryCount < MAX_RETRIES) {
@@ -92,7 +114,7 @@ app.post('/generate-card', async (req, res) => {
         }
 
         const cardJson = await makeOpenAIRequest(description);
-        console.log('Successfully generated card');
+        console.log('Successfully generated card:', cardJson);
         res.json(cardJson);
     } catch (error) {
         console.error('Error in /generate-card:', error);
@@ -110,4 +132,8 @@ app.post('/generate-card', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log('Environment check:', {
+        nodeEnv: process.env.NODE_ENV,
+        hasOpenAIKey: !!process.env.OPENAI_API_KEY
+    });
 });
