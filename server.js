@@ -91,8 +91,12 @@ app.post('/generate-card', async (req, res) => {
         }
 
         const statusCode = error.message.includes('timeout') ? 504 : 500;
+        const userMessage = error.message.includes('timeout')
+            ? 'Request timed out. Please try again.'
+            : error.message || 'An error occurred while generating the card. Please try again.';
+        
         res.status(statusCode).json({ 
-            error: 'An error occurred while generating the card. Please try again.',
+            error: userMessage,
             details: error.message 
         });
     } finally {
