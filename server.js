@@ -48,12 +48,26 @@ app.get('/', (req, res) => {
 
 // Add connection pooling agent
 const Agent = require('agentkeepalive');
-const keepaliveAgent = new Agent({
-    maxSockets: 100,
-    maxFreeSockets: 10,
-    timeout: 60000,
-    freeSocketTimeout: 30000,
-});
+
+// Create agent factory function
+function createAgent() {
+    return new Agent({
+        maxSockets: 100,
+        maxFreeSockets: 10,
+        timeout: 60000,
+        freeSocketTimeout: 30000,
+    });
+}
+
+let keepaliveAgent = createAgent();
+
+// Recreate agent periodically instead of just destroying it
+setInterval(() => {
+    const oldAgent = keepaliveAgent;
+    keepaliveAgent = createAgent();
+    // Destroy old agent after a grace period to allow pending requests to complete
+    setTimeout(() => oldAgent.destroy(), 5000);
+}, 60000);
 
 // Add request tracking
 let activeRequests = 0;
@@ -183,11 +197,6 @@ async function makeOpenAIRequest(description, retryCount = 0) {
         clearTimeout(timeoutId);
     }
 }
-
-// Cleanup stale connections periodically
-setInterval(() => {
-    keepaliveAgent.destroy();
-}, 60000);
 
 process.on('SIGTERM', () => {
     keepaliveAgent.destroy();
