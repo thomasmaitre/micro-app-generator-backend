@@ -46,7 +46,65 @@ app.get('/', (req, res) => {
     });
 });
 
+// Add connection pooling agent
+const Agent = require('agentkeepalive');
+const keepaliveAgent = new Agent({
+    maxSockets: 100,
+    maxFreeSockets: 10,
+    timeout: 60000,
+    freeSocketTimeout: 30000,
+});
+
+// Add request tracking
+let activeRequests = 0;
+const maxConcurrentRequests = 1;
+
+app.post('/generate-card', async (req, res) => {
+    if (activeRequests >= maxConcurrentRequests) {
+        return res.status(429).json({
+            error: 'Server busy',
+            details: 'Too many concurrent requests. Please try again in a few seconds.'
+        });
+    }
+
+    activeRequests++;
+    console.log(`Active requests: ${activeRequests}`);
+
+    try {
+        const { description } = req.body;
+        if (!description) {
+            throw new Error('Description is required');
+        }
+
+        const cardJson = await makeOpenAIRequest(description);
+        res.json(cardJson);
+    } catch (error) {
+        console.error('Error in /generate-card:', error);
+        
+        if (error.isRateLimit) {
+            res.status(429).json({
+                error: 'Rate limit exceeded',
+                details: 'The AI service is currently at capacity. Please try again in about an hour.',
+                retryAfter: error.retryAfter || 3600
+            });
+            return;
+        }
+
+        const statusCode = error.message.includes('timeout') ? 504 : 500;
+        res.status(statusCode).json({ 
+            error: 'An error occurred while generating the card. Please try again.',
+            details: error.message 
+        });
+    } finally {
+        activeRequests--;
+        console.log(`Request completed. Active requests: ${activeRequests}`);
+    }
+});
+
 async function makeOpenAIRequest(description, retryCount = 0) {
+    let controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     try {
         if (!process.env.OPENAI_API_KEY) {
             console.error('OpenAI API key missing');
@@ -54,7 +112,6 @@ async function makeOpenAIRequest(description, retryCount = 0) {
         }
 
         console.log(`Making OpenAI request for description: ${description} (attempt ${retryCount + 1})`);
-        console.log('API Key exists:', !!process.env.OPENAI_API_KEY);
         
         const requestBody = {
             model: "gpt-3.5-turbo",
@@ -71,105 +128,66 @@ async function makeOpenAIRequest(description, retryCount = 0) {
             temperature: 0.7
         };
 
-        console.log('Request body:', JSON.stringify(requestBody, null, 2));
-        
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Connection': 'close'
             },
-            body: JSON.stringify(requestBody)
+            body: JSON.stringify(requestBody),
+            agent: keepaliveAgent,
+            signal: controller.signal,
+            compress: true
         });
 
-        console.log('OpenAI response status:', response.status);
-        const responseData = await response.json();
-        console.log('OpenAI response:', JSON.stringify(responseData, null, 2));
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
-            console.error('OpenAI error response:', responseData);
-            if (responseData.error?.type === 'resource_exhausted' || responseData.error?.message?.includes('rate limit')) {
-                const error = new Error('Rate limit reached');
+            const error = new Error('OpenAI API request failed');
+            error.status = response.status;
+            error.statusText = response.statusText;
+            
+            if (response.status === 429) {
                 error.isRateLimit = true;
-                error.retryAfter = 3600; // 1 hour in seconds
-                throw error;
-            }
-            throw new Error(responseData.error?.message || 'API request failed');
-        }
-
-        if (!responseData.choices || !responseData.choices[0] || !responseData.choices[0].message) {
-            console.error('Invalid OpenAI response format:', responseData);
-            throw new Error('Invalid response format from OpenAI');
-        }
-
-        try {
-            const content = responseData.choices[0].message.content;
-            console.log('Attempting to parse content:', content);
-            const cardJson = JSON.parse(content);
-            
-            if (!cardJson.type || cardJson.type !== 'AdaptiveCard') {
-                console.error('Invalid card format:', cardJson);
-                throw new Error('Response is not a valid Adaptive Card');
+                error.retryAfter = 3600;
             }
             
-            return cardJson;
-        } catch (parseError) {
-            console.error('Error parsing OpenAI response:', parseError);
-            console.error('Raw content:', responseData.choices[0].message.content);
-            throw new Error('Failed to parse OpenAI response as JSON');
+            throw error;
         }
+
+        const data = await response.json();
+        
+        if (!data.choices?.[0]?.message?.content) {
+            throw new Error('Invalid response from OpenAI');
+        }
+
+        const content = data.choices[0].message.content;
+        const cardJson = JSON.parse(content);
+
+        if (!cardJson.type || cardJson.type !== 'AdaptiveCard') {
+            throw new Error('Invalid Adaptive Card format');
+        }
+
+        return cardJson;
     } catch (error) {
-        console.error('Error in makeOpenAIRequest:', error.message);
-        console.error('Error stack:', error.stack);
+        if (error.name === 'AbortError') {
+            throw new Error('Request timed out');
+        }
         throw error;
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 
-app.post('/generate-card', async (req, res) => {
-    console.log('Received request:', req.body);
-    console.log('Headers:', req.headers);
-    
-    try {
-        const { description } = req.body;
-        
-        if (!description) {
-            console.log('Missing description in request');
-            return res.status(400).json({ 
-                error: 'Description is required',
-                details: 'Please provide a description for the card generation'
-            });
-        }
+// Cleanup stale connections periodically
+setInterval(() => {
+    keepaliveAgent.destroy();
+}, 60000);
 
-        console.log('Starting card generation for description:', description);
-        const cardJson = await makeOpenAIRequest(description);
-        console.log('Successfully generated card:', JSON.stringify(cardJson, null, 2));
-        res.json(cardJson);
-    } catch (error) {
-        console.error('Error in /generate-card:', {
-            message: error.message,
-            stack: error.stack,
-            isRateLimit: error.isRateLimit,
-            retryAfter: error.retryAfter
-        });
-        
-        if (error.isRateLimit) {
-            return res.status(429).json({
-                error: 'Rate limit exceeded',
-                details: 'The AI service is currently at capacity. Please try again in about an hour.',
-                retryAfter: error.retryAfter || 3600
-            });
-        }
-        
-        const statusCode = error.message.includes('API key') ? 500 : 500;
-        const userMessage = error.message.includes('API key') 
-            ? 'Server configuration error. Please contact support.'
-            : 'An error occurred while generating the card. Please try again.';
-        
-        res.status(statusCode).json({ 
-            error: userMessage,
-            details: error.message 
-        });
-    }
+process.on('SIGTERM', () => {
+    keepaliveAgent.destroy();
+    process.exit(0);
 });
 
 app.listen(PORT, () => {
